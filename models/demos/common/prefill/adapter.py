@@ -206,6 +206,12 @@ class PrefillModelAdapter(ABC):
     moe_pcc_threshold: float = 0.999
     mla_pcc_threshold: float = 0.999
     supports_pretrained: bool = True
+    # Use ``config_builder`` for pretrained tests too, instead of AutoConfig on the checkpoint. Set
+    # True when the checkpoint's config loads but says something the TT stack would misread.
+    config_builder_overrides_checkpoint: bool = False
+    # Checkpoint stores routed experts stacked (one `mlp.experts.gate_up_proj` of [n_experts, ...])
+    # rather than per-expert. The pretrained fixture cannot split that, so it loads attention only.
+    packed_expert_checkpoint: bool = False
     # Whether the tokenizer needs trust_remote_code=True (custom tokenizer code shipped in the repo,
     # e.g. Kimi's tiktoken-backed BBPE). DeepSeek-V3 uses a stock fast tokenizer, so it turns this off
     # to avoid the flat-config trust_remote_code import path that otherwise breaks its load.
@@ -279,6 +285,8 @@ ADAPTER_PATHS = {
     "kimi_k2_6": "models.demos.deepseek_v3_d_p.tt.runners.adapters.kimi_k2_6:KimiK26Adapter",
     # Kimi-K2.7: same architecture as K2.6, new checkpoint (adapters/kimi_k2_7.py).
     "kimi_k2_7": "models.demos.deepseek_v3_d_p.tt.runners.adapters.kimi_k2_7:KimiK27Adapter",
+    # Mistral-Small-4-119B: dense MLA + MoE; config hand-built (transformers 5.x rope_parameters).
+    "mistral_small_4_119b": "models.demos.deepseek_v3_d_p.tt.runners.adapters.mistral_small_4_119b:MistralSmall4119BAdapter",
     "minimax_m3": "models.demos.minimax_m3.tt.runners.adapters.minimax_m3:MiniMaxM3PrefillAdapter",
     # GPT-OSS-120B: GQA (not MLA) + attention sinks + sliding/full alternation + EP MoE.
     "gpt_oss_d_p": "models.demos.gpt_oss_d_p.tt.runners.adapters.gpt_oss:GptOssPrefillAdapter",
