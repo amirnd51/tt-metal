@@ -23,19 +23,22 @@ The operation returns both:
 - **sorted** (bool, optional): If True, ensures the output is sorted. Defaults to True.
 - **memory_config** (MemoryConfig, optional): Specifies memory configuration for the output tensors. Defaults to None.
 - **sub_core_grids** (CoreRangeSet, optional): Specifies the core grid to use for computation. Defaults to all compute cores.
-- **indices_tensor** (Tensor, optional): Pre-existing indices tensor to use instead of creating new ones. Defaults to None.
+- **indices_tensor** (Tensor, optional): Pre-existing indices tensor to use instead of generating an iota. Must match the input's logical shape, be TILE layout, and is only supported when `dim` is the last dimension. Defaults to None.
 - **preallocated_output_tensors** (tuple of Tensors, optional): Preallocated tensors for the output values and indices. Defaults to None.
 
 ### Usage Limitations
 
-- Supported index tensor types: `uint16`, `uint32` (a user-provided `indices_tensor` must be `uint32` when the input tensor is `float32`, since fp32 forces UINT32 index CBs)
+- Supported index tensor types: `uint16`, `uint32`, `int32`
+- Index width: `uint16` if the tile-padded reduced dimension fits in 16 bits and the input is not `float32`, else `uint32` (fp32 sorts in a 32-bit DEST, where indices are loaded as `int32`)
+- A preallocated indices output overrides that width and may be wider than required. A supplied `indices_tensor` widens it to 32-bit when the output is not preallocated, and must otherwise have the same element width as the output indices dtype
+- `indices_tensor` is only supported when `dim` is the last dimension (the values input is transposed to last-dim internally; the indices tensor is not)
 - Supported value tensor types: `bfloat16`, `bfloat8_b`, `float32`
-- Input tensor must be in **TILE** layout
+- All tensors must be in **TILE** layout — the input, a supplied `indices_tensor`, and preallocated outputs
 - Input shape must be 4D (after internal transformations)
 - The dimension to select top K from must have at least 64 elements (min_dim_per_core)
 - Combined batch dimensions (W × H × D) must be a multiple of 32
 - Sharded memory configuration is not yet supported
-- Multi-core implementation only supports K ≤ 64 and requires uint16 indices
+- Multi-core implementation only supports K ≤ 64 (both 16- and 32-bit indices are supported)
 - Multi-core implementation requires width ≥ 8192 (multi_core_min_width)
 
 ## Tensor Transformations
@@ -107,7 +110,7 @@ The TTNN TopK operation provides two execution strategies, each optimized for di
 | Strategy              | Description                                                                                     | Strengths                                                                            | Weaknesses                                                                                   | Typical Use Case                                |
 | --------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------- | ----------------------------------------------- |
 | **Single Core**       | Each row is processed entirely on a single core using Bitonic Sort.                            | Simple, works for any tensor size, supports both uint16 and uint32 indices.         | Limited parallelism; all work for a row happens on one core.                                 | Default strategy for most cases.                |
-| **Multi Core**        | Work is split across multiple cores: local TopK on each core, then a final gather and TopK.    | **Highest parallelism**; exploits L1-to-L1 NoC communication; faster for large data. | Only supports K ≤ 64, uint16 indices only, requires width ≥ 8192, higher memory complexity. | Very wide tensors (width ≥ 8192) with small K. |
+| **Multi Core**        | Work is split across multiple cores: local TopK on each core, then a final gather and TopK.    | **Highest parallelism**; exploits L1-to-L1 NoC communication; faster for large data. | Only supports K ≤ 64, requires a power-of-two width ≥ 8192 and below 65536, higher memory complexity. | Very wide tensors (width ≥ 8192) with small K. |
 
 ### Key Points:
 
@@ -123,7 +126,7 @@ The TTNN TopK operation provides two execution strategies, each optimized for di
   * However, its applicability is limited by:
     * **K ≤ 64** (one or two tiles)
     * **Width ≥ 8192** (minimum for multi-core splitting)
-    * **uint16 indices only** (to fit in L1 memory constraints)
+    * **Width below 65536** and a **power of two** (bitonic network limits; both 16- and 32-bit indices are supported)
     * Sufficient **L1 memory** per core for local processing and gather phase
 
 ## Strategy Selection Logic
@@ -141,8 +144,9 @@ All of the following conditions must be satisfied for multi-core execution:
    - Multi-core algorithm has optimized paths for small K values
    - Larger K values may not benefit from parallel execution
 
-3. **Index Type**: Input dimension < 65536
-   - Multi-core implementation currently only supports UInt16 indices
+3. **Reduced Dimension**: < 65536
+   - Required by the multi-core bitonic sort network
+   - Both 16- and 32-bit index outputs are supported
    - Dimensions ≥ 65536 force single-core execution with UInt32 indices
 
 4. **Memory and Core Feasibility**: Pass `verify_multi_core_cost()` checks

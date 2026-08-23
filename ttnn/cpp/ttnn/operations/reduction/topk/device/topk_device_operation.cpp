@@ -23,8 +23,10 @@ using namespace tt::tt_metal;
 namespace ttnn::prim {
 
 namespace {
-// The index dtype the op runs at: the index CB, the generated iota and the output tensor all follow
-// it. A preallocated indices output pins it; otherwise a 32-bit indices_tensor widens it.
+// The index dtype the op runs at: index CB, generated iota and output tensor all follow it.
+// A preallocated indices output pins it; otherwise a 32-bit indices_tensor widens it.
+// Do not widen for UINT16 too: the width check below compares against this, and would then
+// compare UINT16 with itself and let a too-narrow tensor through.
 DataType resolve_index_dtype(
     const TopKDeviceOperation::operation_attributes_t& args, const TopKDeviceOperation::tensor_args_t& tensor_args) {
     if (tensor_args.preallocated_outputs.has_value()) {
@@ -205,6 +207,7 @@ void TopKDeviceOperation::validate_on_program_cache_miss(
 
     // Optional indices tensor validation (for pre-allocated indices)
     if (indices_tensor.has_value()) {
+        // The reader pages this tensor as tiles; row-major is read at the wrong stride.
         TT_FATAL(
             indices_tensor->layout() == Layout::TILE,
             "Optional indices tensor must be in tiled format, got: {}",
@@ -213,16 +216,15 @@ void TopKDeviceOperation::validate_on_program_cache_miss(
         TT_FATAL(
             indices_tensor_dtype == DataType::UINT16 || indices_tensor_dtype == DataType::UINT32 ||
                 indices_tensor_dtype == DataType::INT32,
-            "Optional input tensor must be UINT16, UINT32, or INT32, got: {}",
+            "Optional indices tensor must be UINT16, UINT32, or INT32, got: {}",
             indices_tensor_dtype);
-        // fp32 input forces UINT32 index CBs (see compute_output_specs); UINT16 indices would be wrong.
+        // fp32 forces UINT32 index CBs. The width check below catches this too, but says less.
         TT_FATAL(
             !(input_tensor_dtype == DataType::FLOAT32 && indices_tensor_dtype == DataType::UINT16),
             "Optional indices tensor must be UINT32 when input tensor is FLOAT32, got UINT16");
-        // The reader reads this tensor into the index CB one CB entry at a time, so the two element
-        // widths must match: mismatched, it pages the wrong bytes and silently returns indices that
-        // do not belong to the returned values. Only a preallocated indices output can make them
-        // disagree; without one the resolved dtype is required_index_dtype() itself.
+        // The reader pages this tensor into the index CB at the resolved width, so the two must
+        // match. They differ when the payload is too narrow, or a preallocated output pins a
+        // different width.
         const DataType resolved_index_dtype = resolve_index_dtype(args, tensor_args);
         const bool index_widths_agree =
             (indices_tensor_dtype == DataType::UINT16) == (resolved_index_dtype == DataType::UINT16);
@@ -250,8 +252,7 @@ void TopKDeviceOperation::validate_on_program_cache_miss(
     if (preallocated_outputs.has_value()) {
         const auto& output_tensor0 = std::get<0>(preallocated_outputs.value());  // Values tensor
         const auto& output_tensor1 = std::get<1>(preallocated_outputs.value());  // Indices tensor
-        // The writer packs tiles into these buffers, and compute_output_specs hands their specs back
-        // as the op's output specs, so a row-major one is written as if it were tiled.
+        // The writer packs tiles into these; row-major is written at the wrong stride.
         TT_FATAL(
             output_tensor0.layout() == Layout::TILE,
             "Preallocated output tensor must be in tiled format, got: {}",

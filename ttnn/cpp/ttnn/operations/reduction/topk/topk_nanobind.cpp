@@ -45,7 +45,7 @@ void bind_reduction_topk_operation(nb::module_& mod) {
                 memory_config (ttnn.MemoryConfig, optional): Memory configuration for the operation. Defaults to `None`.
                 output_tensor (tuple[ttnn.Tensor, ttnn.Tensor], optional): A tuple with preallocated output tensors for the values and indices. If specified, must be on the same device as :attr:`input_tensor`. Defaults to (`None`, `None`).
                 sub_core_grids (ttnn.CoreRangeSet, optional): Core range set to run the operation on. Defaults to `None`.
-                indices_tensor (ttnn.Tensor, optional): Input tensor containing pre-computed index values. When provided, the operation reads indices from this tensor instead of generating them. Defaults to `None`.
+                indices_tensor (ttnn.Tensor, optional): Input tensor containing pre-computed index values. When provided, the operation reads indices from this tensor instead of generating them. Must match the input's logical shape, be TILE layout, and is only supported when :attr:`dim` is the last dimension. A 32-bit tensor widens the output index dtype when the indices output is not preallocated; otherwise it must have the same element width as the output indices dtype. Defaults to `None`.
                 stable (bool, optional): EXPERIMENTAL, best effort only -- do not rely on this for correctness. Asks the LLK's stable bitonic network to break exact-value ties by lowest index rather than by array position. The stable network is an open issue (tenstorrent/tt-metal#33492): it can still return incorrect indices for tied values, and every stable case in the LLK test suite is currently skipped, so a caller passing `True` may get either tie-break. Only Wormhole B0 and Blackhole implement it at all; other architectures raise. Off by default. Defaults to `False`.
 
             Returns:
@@ -71,8 +71,10 @@ void bind_reduction_topk_operation(nb::module_& mod) {
                       - TILE
 
                 The :attr:`output_value_tensor` will have the same data type as :attr:`input_tensor` and will be in TILE layout.
-                The :attr:`output_index_tensor` will be in TILE layout. Its data type is UINT16 or UINT32 by default (chosen
-                based on the reduced dimension size), or matches the preallocated index tensor dtype (UINT16, UINT32, or INT32) when one is provided.
+                The :attr:`output_index_tensor` will be in TILE layout. Its data type is UINT16 or UINT32 by default
+                (UINT16 when the tile-padded reduced dimension fits in 16 bits and the input is not FLOAT32, else UINT32).
+                A 32-bit :attr:`indices_tensor` widens that default when the indices output is not preallocated.
+                A preallocated index tensor pins the dtype (UINT16, UINT32, or INT32) and may be wider than the default.
 
             Memory Support:
                 - Interleaved: DRAM and L1

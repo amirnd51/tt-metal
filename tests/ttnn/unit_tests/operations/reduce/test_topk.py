@@ -40,9 +40,9 @@ def run_topk_test(N, C, H, W, k, dtype, dim, sorted, largest, device, sub_core_g
     pyt_topk_values, pyt_topk_indices = torch.topk(input, k, dim=dim, largest=largest, sorted=True)
 
     if pass_indices_tensor:
-        indices_tensor_torch = torch.zeros(shape, dtype=torch_indices_dtype)
-        for i in range(W):
-            indices_tensor_torch[:, :, :, i] = i
+        # Label column i as W - 1 - i. A plain iota is what the reader generates anyway, so it
+        # would pass even if the tensor were never read. Undone before the gather below.
+        indices_tensor_torch = (W - 1 - torch.arange(W)).expand(shape).contiguous().to(torch_indices_dtype)
         indices_tensor = ttnn.from_torch(
             indices_tensor_torch, ttnn_indices_dtype, layout=ttnn.Layout.TILE, device=device
         )
@@ -89,7 +89,11 @@ def run_topk_test(N, C, H, W, k, dtype, dim, sorted, largest, device, sub_core_g
     # rounding may also cause more ties than expected
     # the bigger we get, the tighter the distribution of the top K elements, so the pcc will be worse as stability/rounding will cause more ties
     # use cosine similarity on the gathered indices as this will show the top elements are all about the same
-    ttnn_torch_gather_from_indices = torch.gather(input, dim, ttnn_torch_indices.to(torch.int64))
+    # With a payload the labels are backwards (see above), so map them back to columns first.
+    ttnn_torch_columns = ttnn_torch_indices.to(torch.int64)
+    if pass_indices_tensor:
+        ttnn_torch_columns = W - 1 - ttnn_torch_columns
+    ttnn_torch_gather_from_indices = torch.gather(input, dim, ttnn_torch_columns)
     cosine = torch.nn.CosineSimilarity(dim=dim)
     ttnn_torch_cosine = torch.mean(cosine(pyt_topk_values, ttnn_torch_gather_from_indices))
 
@@ -546,6 +550,145 @@ def test_topk_multicore_values_beyond_first_tile_row(num_rows, largest, device):
     assert torch.allclose(
         got_s, ref_s, atol=1e-2
     ), f"values fabricated past first tile row: max_diff={(got_s - ref_s).abs().max():.4f}"
+
+
+# ---------------------------------------------------------------------------
+# Caller-supplied indices_tensor: payload and index-width contract.
+# The reader pages the tensor into the index CB at the resolved width, so the
+# payload only survives when the two widths match.
+# ---------------------------------------------------------------------------
+
+# Wider than UINT16 can address, so the op resolves to UINT32.
+WIDTH_NEEDING_UINT32_INDICES = 2 * UINT16_MAX + 1
+
+
+def as_tiled(torch_tensor, dtype, device):
+    return ttnn.from_torch(torch_tensor, dtype, layout=ttnn.Layout.TILE, device=device)
+
+
+def make_input(W, device):
+    """A bf16 [1, 1, 32, W] input, on device."""
+    return as_tiled(torch.randn([1, 1, 32, W], dtype=torch.bfloat16), ttnn.bfloat16, device)
+
+
+def make_preallocated_outputs(k, index_dtype, device):
+    """Zeroed (values, indices) outputs at the topk output shape [1, 1, 32, k]."""
+    zeros = torch.zeros([1, 1, 32, k], dtype=torch.bfloat16)
+    return as_tiled(zeros, ttnn.bfloat16, device), as_tiled(zeros, index_dtype, device)
+
+
+@pytest.mark.parametrize("W", (64, 16384), ids=["single_core", "multi_core"])
+@pytest.mark.parametrize(
+    "torch_index_dtype, ttnn_index_dtype",
+    ((torch.uint16, ttnn.uint16), (torch.uint32, ttnn.uint32)),
+)
+def test_topk_indices_tensor_payload_is_used(W, torch_index_dtype, ttnn_index_dtype, device):
+    # topk must return the caller's labels, not a generated iota.
+    torch.manual_seed(2005)
+    k = 32
+    torch_input = torch.randn([1, 1, 32, W], dtype=torch.bfloat16)
+    ttnn_input = as_tiled(torch_input, ttnn.bfloat16, device)
+
+    # Label the columns backwards, so an ignored payload cannot pass. Backwards is its own
+    # inverse: a returned label L came from column W-1-L.
+    backwards = W - 1 - torch.arange(W, dtype=torch.int64)
+    labels = backwards.expand_as(torch_input).contiguous().to(torch_index_dtype)
+
+    ttnn_values, ttnn_indices = ttnn.topk(
+        ttnn_input, k, dim=-1, largest=True, sorted=True, indices_tensor=as_tiled(labels, ttnn_index_dtype, device)
+    )
+
+    # A 32-bit indices_tensor widens the auto-selected output index dtype so the labels fit.
+    assert ttnn_indices.dtype == ttnn_index_dtype
+
+    values = ttnn.to_torch(ttnn_values)
+    returned_labels = ttnn.to_torch(ttnn_indices, dtype=torch_index_dtype).to(torch.int64)
+    assert returned_labels.min() >= 0 and returned_labels.max() < W
+
+    # Checked against the returned values, not torch.topk's indices: ties leave the column
+    # unspecified, but every label must still name a column holding its value.
+    source_columns = W - 1 - returned_labels
+    assert_equal(torch.gather(torch_input, -1, source_columns), values)
+
+
+def test_topk_indices_tensor_labels_above_uint16_max(device):
+    # Labels need not be column indices -- sampling passes global vocab IDs. The output dtype must
+    # follow the payload, not the reduced dim, or these come back truncated to 16 bits.
+    torch.manual_seed(2005)
+    k, W = 32, 16384
+    offset = 100_000  # W alone resolves to UINT16, but every label here is above UINT16_MAX
+
+    torch_input = torch.randn([1, 1, 32, W], dtype=torch.bfloat16)
+    labels = (offset + torch.arange(W)).expand_as(torch_input).contiguous().to(torch.uint32)
+
+    ttnn_values, ttnn_indices = ttnn.topk(
+        as_tiled(torch_input, ttnn.bfloat16, device),
+        k,
+        dim=-1,
+        indices_tensor=as_tiled(labels, ttnn.uint32, device),
+    )
+
+    assert ttnn_indices.dtype == ttnn.uint32
+
+    values = ttnn.to_torch(ttnn_values)
+    returned_labels = ttnn.to_torch(ttnn_indices, dtype=torch.uint32).to(torch.int64)
+    assert returned_labels.min() > UINT16_MAX, "labels were truncated to 16 bits"
+
+    # Each label must still name the column holding its value, offset and all.
+    source_columns = returned_labels - offset
+    assert source_columns.min() >= 0 and source_columns.max() < W
+    assert_equal(torch.gather(torch_input, -1, source_columns), values)
+
+
+@pytest.mark.parametrize(
+    "W, indices_dtype, preallocated_index_dtype",
+    (
+        # A preallocated indices output pins the width. At W=64 both widths are individually legal,
+        # so only a cross-check catches the disagreement.
+        (64, ttnn.uint16, ttnn.uint32),
+        (64, ttnn.uint32, ttnn.uint16),
+        # With no preallocated output the width follows the reduced dim, which needs UINT32 here.
+        (WIDTH_NEEDING_UINT32_INDICES, ttnn.uint16, None),
+    ),
+    ids=["output_wider", "output_narrower", "narrower_than_reduced_dim"],
+)
+def test_topk_indices_tensor_width_mismatch_raise(W, indices_dtype, preallocated_index_dtype, device, expect_error):
+    # A width that disagrees with the index CB makes the reader page the wrong bytes. The payload
+    # does not matter here -- the call must be rejected before it runs.
+    torch.manual_seed(0)
+    k = 32
+    indices_tensor = as_tiled(torch.zeros([1, 1, 32, W], dtype=torch.int32), indices_dtype, device)
+    outputs = (
+        None if preallocated_index_dtype is None else make_preallocated_outputs(k, preallocated_index_dtype, device)
+    )
+
+    with expect_error(RuntimeError, "must have the same width as the output indices dtype"):
+        ttnn.topk(make_input(W, device), k=k, dim=-1, indices_tensor=indices_tensor, output_tensor=outputs)
+
+
+@pytest.mark.parametrize("tensor_under_test", ("indices_tensor", "output_tensor"))
+def test_topk_row_major_tensor_raise(tensor_under_test, device, expect_error):
+    # Only the values input used to be layout-checked. Both of these are paged as tiles, so a
+    # row-major one is read or written at the wrong stride.
+    torch.manual_seed(0)
+    k = 32
+    W = 64
+    row_major = ttnn.Layout.ROW_MAJOR
+
+    if tensor_under_test == "indices_tensor":
+        labels = torch.zeros([1, 1, 32, W], dtype=torch.int32)
+        kwargs = {"indices_tensor": ttnn.from_torch(labels, ttnn.uint16, layout=row_major, device=device)}
+    else:
+        zeros = torch.zeros([1, 1, 32, k], dtype=torch.bfloat16)
+        kwargs = {
+            "output_tensor": (
+                ttnn.from_torch(zeros, ttnn.bfloat16, layout=row_major, device=device),
+                ttnn.from_torch(zeros, ttnn.uint16, layout=row_major, device=device),
+            )
+        }
+
+    with expect_error(RuntimeError, "must be in tiled format"):
+        ttnn.topk(make_input(W, device), k=k, dim=-1, **kwargs)
 
 
 # ---------------------------------------------------------------------------
