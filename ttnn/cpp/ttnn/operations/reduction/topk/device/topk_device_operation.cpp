@@ -23,20 +23,20 @@ using namespace tt::tt_metal;
 namespace ttnn::prim {
 
 namespace {
-// Resolves the data type that will be used for the output index tensor: the preallocated indices dtype when
-// provided, otherwise the auto-selected width (UINT16 when the reduced dimension fits in 16 bits, else UINT32).
+// The index dtype the op runs at: the index CB, the generated iota and the output tensor all follow
+// it. A preallocated indices output pins it; otherwise a 32-bit indices_tensor widens it.
 DataType resolve_index_dtype(
     const TopKDeviceOperation::operation_attributes_t& args, const TopKDeviceOperation::tensor_args_t& tensor_args) {
     if (tensor_args.preallocated_outputs.has_value()) {
         return std::get<1>(tensor_args.preallocated_outputs.value()).dtype();
     }
-    const auto input_shape = tensor_args.input.padded_shape();
-    // fp32 input sorts with fp32 dest accumulation, which loads indices as INT32, so it requires
-    // 32-bit indices regardless of dimension size. This must agree with compute_output_specs, or the
-    // index CB format and the single-core cost model describe UInt16 while the output tensor is UINT32.
-    const bool uint16_indices = (input_shape[args.dim] <= std::numeric_limits<uint16_t>::max()) &&
-                                (tensor_args.input.dtype() != DataType::FLOAT32);
-    return uint16_indices ? DataType::UINT16 : DataType::UINT32;
+    if (tensor_args.indices.has_value()) {
+        const auto indices_dtype = tensor_args.indices->dtype();
+        if (indices_dtype == DataType::UINT32 || indices_dtype == DataType::INT32) {
+            return indices_dtype;
+        }
+    }
+    return required_index_dtype(tensor_args.input, args.dim);
 }
 
 // Maps the resolved index dtype onto the circular-buffer data format used by the sort datapath. 16-bit indices
@@ -205,6 +205,10 @@ void TopKDeviceOperation::validate_on_program_cache_miss(
 
     // Optional indices tensor validation (for pre-allocated indices)
     if (indices_tensor.has_value()) {
+        TT_FATAL(
+            indices_tensor->layout() == Layout::TILE,
+            "Optional indices tensor must be in tiled format, got: {}",
+            indices_tensor->layout());
         const auto indices_tensor_dtype = indices_tensor->dtype();
         TT_FATAL(
             indices_tensor_dtype == DataType::UINT16 || indices_tensor_dtype == DataType::UINT32 ||
@@ -215,6 +219,18 @@ void TopKDeviceOperation::validate_on_program_cache_miss(
         TT_FATAL(
             !(input_tensor_dtype == DataType::FLOAT32 && indices_tensor_dtype == DataType::UINT16),
             "Optional indices tensor must be UINT32 when input tensor is FLOAT32, got UINT16");
+        // The reader reads this tensor into the index CB one CB entry at a time, so the two element
+        // widths must match: mismatched, it pages the wrong bytes and silently returns indices that
+        // do not belong to the returned values. Only a preallocated indices output can make them
+        // disagree; without one the resolved dtype is required_index_dtype() itself.
+        const DataType resolved_index_dtype = resolve_index_dtype(args, tensor_args);
+        const bool index_widths_agree =
+            (indices_tensor_dtype == DataType::UINT16) == (resolved_index_dtype == DataType::UINT16);
+        TT_FATAL(
+            index_widths_agree,
+            "Optional indices tensor dtype {} must have the same width as the output indices dtype {}",
+            indices_tensor_dtype,
+            resolved_index_dtype);
         // The reader kernels page a caller-supplied indices tensor with the input's page index
         // (page_id = i * Wt + j), so the two must describe the same tile grid: same padded width
         // and same total number of tiles. A narrower indices tensor is read past the end of its
@@ -232,8 +248,20 @@ void TopKDeviceOperation::validate_on_program_cache_miss(
 
     // Preallocated output tensor validation
     if (preallocated_outputs.has_value()) {
-        const auto output_tensor0_dtype = std::get<0>(preallocated_outputs.value()).dtype();  // Values tensor
-        const auto output_tensor1_dtype = std::get<1>(preallocated_outputs.value()).dtype();  // Indices tensor
+        const auto& output_tensor0 = std::get<0>(preallocated_outputs.value());  // Values tensor
+        const auto& output_tensor1 = std::get<1>(preallocated_outputs.value());  // Indices tensor
+        // The writer packs tiles into these buffers, and compute_output_specs hands their specs back
+        // as the op's output specs, so a row-major one is written as if it were tiled.
+        TT_FATAL(
+            output_tensor0.layout() == Layout::TILE,
+            "Preallocated output tensor must be in tiled format, got: {}",
+            output_tensor0.layout());
+        TT_FATAL(
+            output_tensor1.layout() == Layout::TILE,
+            "Preallocated indices tensor must be in tiled format, got: {}",
+            output_tensor1.layout());
+        const auto output_tensor0_dtype = output_tensor0.dtype();
+        const auto output_tensor1_dtype = output_tensor1.dtype();
         TT_FATAL(
             output_tensor0_dtype == DataType::BFLOAT16 || output_tensor0_dtype == DataType::BFLOAT8_B ||
                 output_tensor0_dtype == DataType::FLOAT32,
@@ -329,19 +357,11 @@ TopKDeviceOperation::spec_return_value_t TopKDeviceOperation::compute_output_spe
     auto output_shape = input_tensor.logical_shape();
     output_shape[-1] = args.k;  // Set last dimension to K (number of top elements)
 
-    ttnn::Shape input_shape = input_tensor.padded_shape();
-    // Choose index data type based on dimension size (16-bit vs 32-bit indices).
-    // fp32 input sorts with fp32 dest accumulation, which loads indices as INT32, so it
-    // requires 32-bit (UINT32) indices regardless of dimension size.
-    const bool uint16_output = (input_shape[args.dim] <= std::numeric_limits<uint16_t>::max()) &&
-                               (input_tensor.dtype() != DataType::FLOAT32);  // 65535
-
     // Create values tensor specification (same data type as input)
     const auto values_spec = tt::tt_metal::TensorSpec(
         output_shape, TensorLayout(input_tensor.dtype(), PageConfig(Layout::TILE), args.output_memory_config));
 
-    // Create indices tensor specification (integer type based on dimension size)
-    const DataType index_dtype = uint16_output ? DataType::UINT16 : DataType::UINT32;
+    const DataType index_dtype = resolve_index_dtype(args, tensor_args);
     const auto index_spec = tt::tt_metal::TensorSpec(
         output_shape, TensorLayout(index_dtype, PageConfig(Layout::TILE), args.output_memory_config));
 
