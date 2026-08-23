@@ -9,6 +9,8 @@ Compares TorchExpert (reference) against TtSharedExpert (multi-chip TTNN)
 to verify correctness of multi-chip sharding and CCL operations.
 """
 
+from contextlib import contextmanager
+
 import pytest
 import torch
 from loguru import logger
@@ -22,6 +24,26 @@ from models.demos.deepseek_v3_d_p.tt.moe.tt_shared_expert import TtSharedExpert
 from models.demos.deepseek_v3_d_p.tt.tt_ccl import per_axis_topology
 from models.tt_transformers.tt.ccl import get_num_links
 from tests.ttnn.utils_for_testing import assert_with_pcc
+
+
+@contextmanager
+def shared_expert_sub_device(mesh_device):
+    """Split the Tensix grid the way TtMoe does: dispatch takes the first row, the expert the rest.
+
+    The shared expert only ever runs confined like this -- tt_moe.py carves the grid so the two can
+    overlap on chip -- so exercising it on the full grid would test matmul program configs that
+    nothing outside this file ever builds.
+    """
+    grid = mesh_device.compute_with_storage_grid_size()
+    dispatch = ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(grid.x - 1, 0))})
+    shared = ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(0, 1), ttnn.CoreCoord(grid.x - 1, grid.y - 1))})
+    manager = mesh_device.create_sub_device_manager([ttnn.SubDevice([dispatch]), ttnn.SubDevice([shared])], 0)
+    mesh_device.load_sub_device_manager(manager)
+    try:
+        yield ttnn.SubDeviceId(1), shared
+    finally:
+        mesh_device.clear_loaded_sub_device_manager()
+        mesh_device.remove_sub_device_manager(manager)
 
 
 @pytest.mark.parametrize(
@@ -107,70 +129,73 @@ def test_shared_expert_pcc(
         "down_proj": torch_model.down_proj.data,
     }
 
-    # ========================================
-    # Step 2: Create TTNN model with same weights
-    # ========================================
-    logger.debug("Creating TtSharedExpert with same weights")
-    tt_model = TtSharedExpert(
-        mesh_device=mesh_device,
-        emb_dim=emb_dim,
-        hidden_dim=hidden_dim,
-        torch_weights=torch_weights,
-        num_links=num_links,
-        topology=topology,
-        activations_dtype=activations_dtype,
-        weights_dtype=weights_dtype,
-    )
+    with shared_expert_sub_device(mesh_device) as (subdevice_id, subdevice_cores):
+        # ========================================
+        # Step 2: Create TTNN model with same weights
+        # ========================================
+        logger.debug("Creating TtSharedExpert with same weights")
+        tt_model = TtSharedExpert(
+            mesh_device=mesh_device,
+            emb_dim=emb_dim,
+            hidden_dim=hidden_dim,
+            torch_weights=torch_weights,
+            num_links=num_links,
+            topology=topology,
+            activations_dtype=activations_dtype,
+            weights_dtype=weights_dtype,
+            subdevice_id=subdevice_id,
+            subdevice_cores=subdevice_cores,
+        )
 
-    # ========================================
-    # Step 3: Create input tensor
-    # ========================================
-    # 3D input matching test_ttnn_moe.py convention (post all-gather):
-    #   shape = [dispatch_group_size, seq_len_per_chip, emb_dim]
-    # Sharded along dim 0 across mesh rows (DP), replicated across mesh cols (TP).
-    dispatch_group_size = mesh_shape[0]
-    torch_input = torch.randn(dispatch_group_size, seq_len_per_chip, emb_dim, dtype=torch.float32)
-    logger.debug(f"Created torch input: {torch_input.shape}")
+        # ========================================
+        # Step 3: Create input tensor
+        # ========================================
+        # 3D input matching test_ttnn_moe.py convention (post all-gather):
+        #   shape = [dispatch_group_size, seq_len_per_chip, emb_dim]
+        # Sharded along dim 0 across mesh rows (DP), replicated across mesh cols (TP).
+        dispatch_group_size = mesh_shape[0]
+        torch_input = torch.randn(dispatch_group_size, seq_len_per_chip, emb_dim, dtype=torch.float32)
+        logger.debug(f"Created torch input: {torch_input.shape}")
 
-    tt_input = ttnn.from_torch(
-        torch_input,
-        mesh_mapper=ttnn.ShardTensor2dMesh(mesh_device, mesh_shape=mesh_device.shape, dims=(0, None)),
-        layout=ttnn.TILE_LAYOUT,
-        device=mesh_device,
-        dtype=activations_dtype,
-    )
-    logger.debug(f"Created ttnn input (SP-sharded, TP-replicated): {tt_input.shape}")
+        tt_input = ttnn.from_torch(
+            torch_input,
+            mesh_mapper=ttnn.ShardTensor2dMesh(mesh_device, mesh_shape=mesh_device.shape, dims=(0, None)),
+            layout=ttnn.TILE_LAYOUT,
+            device=mesh_device,
+            dtype=activations_dtype,
+        )
+        logger.debug(f"Created ttnn input (SP-sharded, TP-replicated): {tt_input.shape}")
 
-    # ========================================
-    # Step 4: Run forward passes
-    # ========================================
-    logger.debug("Running torch forward pass")
-    torch_output = torch_model(torch_input)
-    logger.debug(f"Torch output shape: {torch_output.shape}")
+        # ========================================
+        # Step 4: Run forward passes
+        # ========================================
+        logger.debug("Running torch forward pass")
+        torch_output = torch_model(torch_input)
+        logger.debug(f"Torch output shape: {torch_output.shape}")
 
-    logger.debug("Running ttnn forward pass")
-    tt_output = tt_model(tt_input)
-    logger.debug(f"TTNN output shape (sharded): {tt_output.shape}")
+        logger.debug("Running ttnn forward pass")
+        tt_output = tt_model(tt_input)
+        logger.debug(f"TTNN output shape (sharded): {tt_output.shape}")
 
-    # ========================================
-    # Step 5: Convert TTNN output back to torch and compare
-    # ========================================
-    logger.debug("Converting TTNN output to torch for comparison")
-    tt_output_torch = ttnn.to_torch(
-        tt_output,
-        mesh_composer=ttnn.ConcatMesh2dToTensor(mesh_device, mesh_shape=mesh_device.shape, dims=(0, -1)),
-    )
-    logger.debug(f"TTNN output converted to torch: {tt_output_torch.shape}")
+        # ========================================
+        # Step 5: Convert TTNN output back to torch and compare
+        # ========================================
+        logger.debug("Converting TTNN output to torch for comparison")
+        tt_output_torch = ttnn.to_torch(
+            tt_output,
+            mesh_composer=ttnn.ConcatMesh2dToTensor(mesh_device, mesh_shape=mesh_device.shape, dims=(0, -1)),
+        )
+        logger.debug(f"TTNN output converted to torch: {tt_output_torch.shape}")
 
-    # Compare with PCC
-    logger.debug("Comparing outputs with PCC")
-    pcc_passed, pcc_message = assert_with_pcc(
-        torch_output.to(torch.float32),
-        tt_output_torch.to(torch.float32),
-        pcc=0.999,
-    )
+        # Compare with PCC
+        logger.debug("Comparing outputs with PCC")
+        pcc_passed, pcc_message = assert_with_pcc(
+            torch_output.to(torch.float32),
+            tt_output_torch.to(torch.float32),
+            pcc=0.999,
+        )
 
-    logger.debug(f"PCC comparison: {pcc_message}")
-    assert pcc_passed, f"PCC test failed: {pcc_message}"
+        logger.debug(f"PCC comparison: {pcc_message}")
+        assert pcc_passed, f"PCC test failed: {pcc_message}"
 
-    logger.debug("PCC test passed!")
+        logger.debug("PCC test passed!")
