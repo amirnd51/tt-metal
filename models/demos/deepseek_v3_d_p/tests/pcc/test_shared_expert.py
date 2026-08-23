@@ -17,6 +17,7 @@ from loguru import logger
 from tracy import signpost
 
 import ttnn
+from models.demos.deepseek_v3_d_p.reference.deepseek_v4_pro_config import DeepSeekV4ProConfig
 from models.demos.deepseek_v3_d_p.reference.kimi_k3_config import KimiK3Config
 from models.demos.deepseek_v3_d_p.reference.tt.moe.expert import TorchExpert
 from models.demos.deepseek_v3_d_p.tests.fabric_profiles import fabric2d_device_params, torus_x_device_params
@@ -56,9 +57,13 @@ def shared_expert_sub_device(mesh_device):
         # Worth its own case because every prior model has num_shared_experts == 1, so hidden_dim and
         # the shared intermediate coincided and 6144 was never exercised here.
         (640, KimiK3Config.EMB_SIZE, KimiK3Config.SHARED_EXPERT_INTERMEDIATE_SIZE),
+        # DeepSeek-V4-Pro is the only model whose down projection is 24 K-tiles rather than 16 or 48,
+        # so it is the only one where the matmul K block resolves to 12. No MoE test carries a
+        # v4_pro variant, which leaves this the only cover for that branch.
+        (640, DeepSeekV4ProConfig.EMB_SIZE, DeepSeekV4ProConfig.MOE_INTERMEDIATE_SIZE),
     ],
-    # Ids label seq_len_per_chip first, then what differs (the 6144 shared intermediate).
-    ids=["640", "640-k3-6144"],
+    # Ids label seq_len_per_chip first, then what differs (the shared intermediate).
+    ids=["640", "640-k3-6144", "640-v4pro-3072"],
 )
 @pytest.mark.parametrize(
     "mesh_device, device_params, num_links",
