@@ -100,6 +100,59 @@ def test_padded_slice_rm_aligned_row_misaligned_begin(device, input_buffer_type)
     assert_with_pcc(torch_input[..., 1:17], ttnn.to_torch(output), 0.9999)
 
 
+def test_slice_write_zero_volume_is_noop(device):
+    input_tensor = ttnn.from_torch(
+        torch.ones((1, 1, 1, 16), dtype=torch.bfloat16),
+        device=device,
+        layout=ttnn.ROW_MAJOR_LAYOUT,
+        dtype=ttnn.bfloat16,
+    )
+    expected = torch.arange(64, dtype=torch.bfloat16).reshape(1, 1, 4, 16)
+    output_tensor = ttnn.from_torch(
+        expected,
+        device=device,
+        layout=ttnn.ROW_MAJOR_LAYOUT,
+        dtype=ttnn.bfloat16,
+    )
+    result = ttnn.experimental.slice_write(
+        input_tensor,
+        output_tensor,
+        [0, 0, 2, 0],
+        [1, 1, 2, 16],
+        [1, 1, 1, 1],
+    )
+    assert_with_pcc(expected, ttnn.to_torch(result), 0.9999)
+
+
+def test_slice_write_strided_uneven_barrier_batches(device):
+    """8193 rows split as 129/128 expose different per-core merge batch sizes."""
+    torch_input = torch.arange(8193 * 16, dtype=torch.float32).reshape(1, 1, 8193, 16).to(torch.bfloat16)
+    input_tensor = ttnn.from_torch(
+        torch_input,
+        device=device,
+        layout=ttnn.ROW_MAJOR_LAYOUT,
+        dtype=ttnn.bfloat16,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+    )
+    expected = torch.zeros((1, 1, 8193, 32), dtype=torch.bfloat16)
+    expected[..., ::2] = torch_input
+    output_tensor = ttnn.from_torch(
+        torch.zeros_like(expected),
+        device=device,
+        layout=ttnn.ROW_MAJOR_LAYOUT,
+        dtype=ttnn.bfloat16,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+    )
+    result = ttnn.experimental.slice_write(
+        input_tensor,
+        output_tensor,
+        [0, 0, 0, 0],
+        [1, 1, 8193, 32],
+        [1, 1, 1, 2],
+    )
+    assert_with_pcc(expected, ttnn.to_torch(result), 0.9999)
+
+
 _HEIGHT_SHARDED_DIMS = [
     [[2, 256, 300, 64], 128, 22],
     [[2, 256, 128, 32], 64, 8],
