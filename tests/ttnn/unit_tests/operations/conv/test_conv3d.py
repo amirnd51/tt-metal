@@ -623,6 +623,57 @@ def test_conv3d_fp32_reduction_c_in_blocking(device, C_in_block):
     )
 
 
+def test_conv3d_ragged_weight_mcast_empty_group(device):
+    """A ragged C-out partition may assign a multicast group zero output blocks."""
+    input_shape = (1, 512, 2, 2, 2)
+    out_channels = 160
+    kernel_size = (1, 1, 1)
+    stride = (1, 1, 1)
+    padding = (0, 0, 0)
+
+    tt_input, conv3d_module, gt_output, kernel_config, output_dims = setup_conv3d_test(
+        input_shape, out_channels, kernel_size, stride, 1, padding, "zeros", device
+    )
+    config = create_conv3d_config(
+        C_in_block=32,
+        C_out_block=32,
+        compute_with_storage_grid_size=device.compute_with_storage_grid_size(),
+    )
+
+    tt_weight = ttnn.from_torch(conv3d_module.weight.data, dtype=ttnn.bfloat16, pad_value=0)
+    tt_weight = ttnn.experimental.prepare_conv3d_weights(
+        weight_tensor=tt_weight, groups=1, C_in_block=config.C_in_block, alignment=ALIGNMENT, device=device
+    )
+    tt_bias = ttnn.from_torch(
+        conv3d_module.bias.data.reshape(1, -1),
+        device=device,
+        dtype=ttnn.bfloat16,
+        layout=ttnn.TILE_LAYOUT,
+        pad_value=0,
+    )
+
+    tt_output = ttnn.experimental.conv3d(
+        input_tensor=tt_input,
+        weight_tensor=tt_weight,
+        device=device,
+        bias_tensor=tt_bias,
+        dtype=ttnn.bfloat16,
+        output_channels=out_channels,
+        kernel_size=kernel_size,
+        stride=stride,
+        padding=padding,
+        padding_mode="zeros",
+        groups=1,
+        config=config,
+        compute_kernel_config=kernel_config,
+    )
+
+    N, D_out, H_out, W_out = output_dims
+    actual = reshape_output(tt_output, N, D_out, H_out, W_out, out_channels, device)
+    passed, message = check_with_pcc(gt_output, actual, pcc=0.999)
+    assert passed, message
+
+
 def apply_logical_pad_mask(input_tensor, h_start, w_start, logical_h_mask, logical_w_mask):
     """Zero the [N, C, D, H, W] positions conv3d's logical-pad mask drops.
 
