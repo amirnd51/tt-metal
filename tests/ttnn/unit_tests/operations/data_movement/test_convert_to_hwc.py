@@ -189,6 +189,34 @@ def test_convert_to_hwc_with_l1_input_uneven_sharding(
     assert passed, message
 
 
+def test_convert_to_hwc_odd_tile_multi_block_output(device):
+    """Exercise two 1056-stick blocks (33 tiles each), split across both writers."""
+    core_grid = ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(0, 0))})
+    test_convert_to_hwc_with_l1_input(
+        device,
+        B=1,
+        C=1,
+        HW=2112,
+        core_grid=core_grid,
+        padded_sharded_dim=2112,
+        provide_memory_config=True,
+    )
+
+
+def test_convert_to_hwc_large_uneven_raw_dfb_view(device):
+    """Cover a borrowed single-core input whose logical element count exceeds uint16."""
+    core_grid = ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(0, 0))})
+    test_convert_to_hwc_with_l1_input_uneven_sharding(
+        device,
+        B=1,
+        C=8,
+        HW=8447,
+        core_grid=core_grid,
+        padded_sharded_dim=8448,
+        provide_memory_config=True,
+    )
+
+
 @pytest.mark.parametrize("B", [1, 2, 4])
 @pytest.mark.parametrize("C", [1, 2, 3, 4])
 @pytest.mark.parametrize(
@@ -318,6 +346,43 @@ def test_convert_to_hwc_dram(
         expected, actual[:, :, :, : expected.shape[-1]]
     )  # slice off padding that is applied when C % 8 != 0
     assert passed, message
+
+
+@pytest.mark.parametrize("input_buffer_type", [ttnn.BufferType.L1, ttnn.BufferType.DRAM])
+def test_convert_to_hwc_tensor_binding_cache_miss_and_hit(device, input_buffer_type):
+    core_grid = ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(0, 0))})
+    host_input = torch.randn([1, 1, 1, 64], dtype=torch.bfloat16)
+    expected = host_input.transpose(2, 3).reshape(1, 1, 64, 1)
+    input_mem_config = ttnn.MemoryConfig(
+        ttnn.TensorMemoryLayout.WIDTH_SHARDED,
+        input_buffer_type,
+        ttnn.ShardSpec(core_grid, (1, 64), ttnn.ShardOrientation.ROW_MAJOR),
+    )
+    output_mem_config = ttnn.MemoryConfig(
+        ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+        ttnn.BufferType.L1,
+        ttnn.ShardSpec(core_grid, (64, 8), ttnn.ShardOrientation.ROW_MAJOR),
+    )
+    device_input = ttnn.Tensor(
+        host_input, ttnn.bfloat16, device=device, layout=ttnn.ROW_MAJOR_LAYOUT, mem_config=input_mem_config
+    )
+
+    device.disable_and_clear_program_cache()
+    device.enable_program_cache()
+    try:
+        for invocation in range(2):
+            actual = ttnn.experimental.convert_to_hwc(
+                device_input, memory_config=output_mem_config, dtype=ttnn.bfloat16
+            )
+            passed, message = assert_equal(expected, ttnn.to_torch(actual)[:, :, :, :1])
+            assert passed, f"invocation {invocation}: {message}"
+            if invocation == 0:
+                entries_after_miss = device.num_program_cache_entries()
+                assert entries_after_miss > 0
+            else:
+                assert device.num_program_cache_entries() == entries_after_miss
+    finally:
+        device.disable_and_clear_program_cache()
 
 
 @pytest.mark.parametrize("C", CHANNEL_TEST_CASES)
