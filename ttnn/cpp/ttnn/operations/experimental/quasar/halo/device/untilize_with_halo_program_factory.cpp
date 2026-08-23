@@ -88,7 +88,7 @@ const KernelSpecName COMPUTE{"compute"};
 constexpr const char* kReaderKernelPath =
     "ttnn/cpp/ttnn/operations/experimental/quasar/halo/device/kernels/dataflow/halo_gather.cpp";
 constexpr const char* kComputeKernelPath =
-    "ttnn/cpp/ttnn/operations/experimental/quasar/halo/device/kernels/compute/pack_untilize.cpp";
+    "ttnn/cpp/ttnn/operations/sliding_window/halo/device/kernels/compute/pack_untilize.cpp";
 
 // Move one sliding-window config (host) tensor onto the device and return it as
 // a sole-owner MeshTensor for ProgramArtifacts::op_owned_tensors (the framework
