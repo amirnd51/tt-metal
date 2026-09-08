@@ -1,6 +1,6 @@
 {
- "last_run": "2026-08-24T00:29:00Z",
- "run_id": "32676705827",
+ "last_run": "2026-09-08T11:20:00Z",
+ "run_id": "34219757509",
  "open_prs": {
   "52106": {
    "issue": 51660,
@@ -66,7 +66,13 @@
   "53908:bug",
   "54017:bug",
   "53999:bug",
-  "54016:feature-request"
+  "54016:feature-request",
+  "55725:bug",
+  "55724:bug",
+  "55723:bug",
+  "55711:bug",
+  "55710:bug",
+  "55709:bug"
  ],
  "covered_no_duplicate": {
   "52131": "PR #52136 already closes it",
@@ -112,7 +118,13 @@
   "53969": "fix in open PR #53970 (reporter kinginu, backward ops memory_config passthrough)",
   "53963": "fix in open PR #53965 (reporter kinginu, unary program cache key dtype)",
   "53908": "fix in open PR #53909 (reporter kinginu, unary SFPU comparisons)",
-  "53699": "fixed by merged PR #53749 (repo-assist); issue closed, no further action"
+  "53699": "fixed by merged PR #53749 (repo-assist); issue closed, no further action",
+  "55725": "existing open PR #55728 by reporter badnikhil fixes asinh_bw overflow",
+  "55724": "existing open PR #55727 by reporter badnikhil fixes sigmoid_bw cancellation",
+  "55723": "existing open PR #55726 by reporter badnikhil fixes expm1_bw cancellation",
+  "55711": "existing open PR #55714 by reporter badnikhil fixes silu/mish negative-tail underflow",
+  "55710": "existing open PR #55713 by reporter badnikhil fixes softcap underflow",
+  "55709": "existing open PR #55712 by reporter badnikhil fixes round() decimals overflow"
  },
  "dropped_fix_targets": {
   "51845": "maintainer jasondavies rejected both proposed remedies 2026-08-05 -- do not attempt fix",
