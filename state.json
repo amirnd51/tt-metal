@@ -1,6 +1,6 @@
 {
-  "last_run": "2026-09-09T02:00:00Z",
-  "run_id": "34311783958",
+  "last_run": "2026-09-09T11:23:00Z",
+  "run_id": "34344975443",
   "open_prs": {
     "52106": {
       "issue": 51660,
@@ -13,10 +13,6 @@
     "53113": {
       "issue": 53106,
       "status": "reviewer-blocked (CodeOwners pending, 2 groups: blackhole/wormhole LLK owners); /codeowners ping by blozano-tt 2026-08-14; agentic-threat-detected label is a known tooling-failure false positive, not a real finding"
-    },
-    "53478": {
-      "issue": 53282,
-      "status": "CI checks all passed; mergeable_state=behind but that's just needing a rebase against main, not a real conflict; awaiting maintainer review"
     },
     "53655_moe_stallwait": {
       "issue": 53655,
@@ -287,7 +283,37 @@
     "54047": "ci-bug",
     "54044": "bug",
     "54110": "performance monitoring",
-    "54104": "feature-request"
+    "54104": "feature-request",
+    "55900": {
+      "label": "bug",
+      "date": "2026-09-09",
+      "note": "DM_DYNAMIC_NOC hang, one RISC reads DRAM on NoC its sibling multicasts on"
+    },
+    "55898": {
+      "label": "performance monitoring",
+      "date": "2026-09-09",
+      "note": "Blackhole DRAM endpoint request-rate limit, measured perf issue not defect"
+    },
+    "55889": {
+      "label": "bug",
+      "date": "2026-09-09",
+      "note": "matmul silent HiFi2->LoFi fidelity drop w/ core_grid/program_config; confirmed against matmul_device_operation.cpp:2809"
+    },
+    "55896": {
+      "label": "bug",
+      "date": "2026-09-09",
+      "note": "ttnn.concat crashes on DRAM-sharded in/out (CB L1-only assert)"
+    },
+    "55918": {
+      "label": "bug",
+      "date": "2026-09-09",
+      "note": "prefill_runner layer-ack channel created after wait_ready, deadlock"
+    },
+    "55917": {
+      "label": "bug",
+      "date": "2026-09-09",
+      "note": "migration client attach dies on header-init race"
+    }
   },
   "issues_commented": {
     "53922": {
@@ -297,7 +323,14 @@
       ],
       "note": "confirmed root cause vs current main; fix has open perf tradeoff, left for maintainer"
     },
-    "54045": "2026-08-22: confirmed div_sfpu double-rounding claim against current ckernel_sfpu_binop_with_unary.h:41-43"
+    "54045": "2026-08-22: confirmed div_sfpu double-rounding claim against current ckernel_sfpu_binop_with_unary.h:41-43",
+    "55889": {
+      "commented": "2026-09-09",
+      "labeled": [
+        "bug"
+      ],
+      "note": "confirmed create_matmul_attributes fidelity logic against current matmul_device_operation.cpp:2804-2810; flagged for maintainer triage on API footgun fix (146+ call sites affected)"
+    }
   },
   "run_history": [
     {
@@ -359,6 +392,11 @@
       "run_id": "34311783958",
       "date": "2026-09-09",
       "summary": "Investigated #55838 (no fix - premise stale vs current tree), confirmed #55881/#55817/#55823/#55800/#55819 already covered by open PRs, updated Monthly Activity Summary #55015."
+    },
+    {
+      "run_id": "34344975443",
+      "date": "2026-09-09T11:23:00Z",
+      "summary": "Labeled 6 fresh community issues (55900 bug DM_DYNAMIC_NOC hang, 55898 performance monitoring DRAM request-rate, 55889 bug matmul silent fidelity drop, 55896 bug ttnn.concat DRAM-sharded crash, 55918 bug prefill layer-ack deadlock, 55917 bug migration attach race). Commented on #55889 confirming root cause against current matmul_device_operation.cpp. Re-verified tracked PRs: #53478 confirmed merged (moved to resolved), #52106 (erfinv) still open unchanged, #53690 still open/reviewer-blocked unchanged. Updated Monthly Activity Summary #55015."
     }
   ],
   "no_action_reviewed": [
@@ -370,6 +408,10 @@
     "52673": {
       "date": "2026-08-22",
       "note": "closed by maintainer blozano-tt; superseded by #52789/#52790"
+    },
+    "53478": {
+      "date": "2026-09-09",
+      "note": "merged by mateusznowakTT (addcmul composite-fallback multiply association fix for #53282)"
     }
   }
 }
